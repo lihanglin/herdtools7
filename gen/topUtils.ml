@@ -111,9 +111,11 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
 
 
 (* In thread/Out thread *)
-type pt = { ploc:Code.loc ; pdir:Code.dir; }
+    type pt = { ploc:Code.loc ; pdir:Code.dir; }
 
-let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
+    let io_of_node n =
+      {ploc=n.C.C.evt.C.C.loc;
+       pdir=Misc.as_some n.C.C.evt.C.C.dir;}
 
     let io_of_thread n = match n with
     | []|[_] -> None
@@ -121,6 +123,7 @@ let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
         Some (io_of_node n0,io_of_node (Misc.last rem))
 
     let io_of_detour _n = None
+
     let compile_prefetch_ios =
 
       let rec do_rec p = function
@@ -149,8 +152,8 @@ let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
           match C.E.loc_sd e with
           | Same ->
               begin match  n.C.C.evt.C.C.dir with
-              | W -> true
-              | R -> do_rec n.C.C.prev 
+              | Some W -> true
+              | None|Some R -> do_rec n.C.C.prev 
               end
           | Diff -> false in
       do_rec m.C.C.prev
@@ -160,8 +163,8 @@ let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
         let e = n.C.C.edge in
 (*        eprintf "After %s\n" (C.E.pp_edge e) ; *)
         begin match  n.C.C.evt.C.C.dir with
-        | W -> true
-        | R ->
+        | Some W -> true
+        | None|Some R ->
             let nxt = n.C.C.next in
             if nxt == m then false else
             begin match C.E.loc_sd e with
@@ -212,8 +215,8 @@ let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
           else do_rec n.C.C.next in
         let k = 
           match n.C.C.evt.C.C.dir with
-          | W -> StringSet.add n.C.C.evt.C.C.loc k
-          | R -> k in
+          | Some W -> StringSet.add n.C.C.evt.C.C.loc k
+          | Some R|None -> k in
          k in
       do_rec n0
 
@@ -235,8 +238,7 @@ let io_of_node n = {ploc=n.C.C.evt.C.C.loc; pdir=n.C.C.evt.C.C.dir;}
 
 (* insert local check *)
 
-    let is_load_init e =
-      e.C.C.dir = R && e.C.C.v = 0
+    let is_load_init e = e.C.C.dir = Some R && e.C.C.v = 0
 
     let check_here n = match n.C.C.edge.C.E.edge with
     | C.E.Ws Ext

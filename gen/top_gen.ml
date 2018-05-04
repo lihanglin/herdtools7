@@ -113,31 +113,36 @@ module U = TopUtils.Make(O)(Comp)
 
   let call_emit_access st p init n =
     let e = n.C.evt in
+
     if e.C.rmw then match e.C.dir with
-    | R ->
+    | Some R ->
         let r,init,cs,st = Comp.emit_exch st p init e n.C.next.C.evt in
         Some r,init,cs,st
-    | W -> None,init,[],st
+    | Some W|None -> None,init,[],st
 
     else if
       match e.C.atom with
       | None -> true
-      | Some a ->  A.applies_atom a e.C.dir
+      | Some a ->
+          begin match e.C.dir with
+          | None -> false
+          | Some d ->  A.applies_atom a d
+          end
     then
       Comp.emit_access st p init e
     else
       Warn.fatal "atomicity mismatch on edge %s, annotation '%s' on %s"
         (E.pp_edge n.C.edge)
-        (E.pp_atom_option e.C.atom) (pp_dir e.C.dir)
+        (E.pp_atom_option e.C.atom) (Misc.app_opt_def "_" pp_dir e.C.dir)
 
   let call_emit_access_dep st p init n dp r1 v1 =
     let e = n.C.evt in
      if e.C.rmw then match e.C.dir with
-     | R ->
+     | Some R ->
          let r,init,cs,st =
            Comp.emit_exch_dep st p init e n.C.next.C.evt dp r1 in
          Some r,init,cs,st
-     | W -> None,init,[],st
+     | Some W|None -> None,init,[],st
      else
        Comp.emit_access_dep st p init e dp r1 v1
 
@@ -182,7 +187,7 @@ let rec compile_proc chk loc_writes st p ro_prev init ns = match ns with
     let o,init,i,st = emit_access ro_prev st p init n in
         let nchk,add_check =
           match O.docheck,n.C.evt.C.dir,o,ns with
-          | true,R,Some r,_::_ ->
+          | true,Some R,Some r,_::_ ->
               true,Comp.check_load p r n.C.evt
           | _ -> chk,no_check_load in
         let init,mk_c,st = add_check init st in

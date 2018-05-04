@@ -42,6 +42,7 @@ module type S = sig
     | Back  of com (* Return to thread *)
 (* Fake edges *)
     | Id              (* Annotation on access *)
+    | Insert of fence (* Insert some code     *)
 (* fancy *)
     | Hat
     | Rmw
@@ -77,7 +78,8 @@ module type S = sig
   val pp_edges : edge list -> string
 
 (* Get source and target event direction,
-   Returning Irr means that a Read OR a Write is acceptable *)
+   Returning Irr means that a Read OR a Write is acceptable,
+   Returning No means that the direction is not applicable (pseudo edge *)
   val dir_src : edge -> extr
   val dir_tgt : edge -> extr
 
@@ -151,12 +153,13 @@ and type atom = F.atom = struct
     | Leave of com
     | Back of com
     | Id
+    | Insert of fence
     | Hat
     | Rmw
 
   let is_id = function
     | Id -> true
-    | Hat|Rmw|Rf _|Fr _|Ws _|Po (_, _, _)
+    | Insert _|Hat|Rmw|Rf _|Fr _|Ws _|Po (_, _, _)
     | Fenced (_, _, _, _)|Dp (_, _, _)|Leave _|Back _ -> false
 
 
@@ -230,6 +233,7 @@ and type atom = F.atom = struct
     | Leave c -> sprintf "%sLeave" (pp_com c)
     | Back c -> sprintf "%sBack" (pp_com c)
     | Id -> "Id"
+    | Insert f -> F.pp_fence f
 
   let do_pp_edge pp_aa e =
     (match e.edge with Id -> "" | _ -> pp_tedge e.edge) ^
@@ -276,21 +280,22 @@ let pp_dp_default tag sd e = sprintf "%s%s%s" tag (pp_sd sd) (pp_extr e)
 
   exception NotThat of string
 
-  let not_that s = raise (NotThat s)
+  let not_that e msg = raise (NotThat (sprintf "%s: %s" msg (pp_tedge e)))
 
   let do_dir_tgt e = match e with
   | Po(_,_,e)| Fenced(_,_,_,e)|Dp (_,_,e) -> e
   | Rf _| Hat -> Dir R
   | Ws _|Fr _|Rmw -> Dir W
   | Leave c|Back c -> do_dir_tgt_com c
-  | Id -> not_that "do_dir_tgt"
+  | Id|Insert _ -> not_that e "do_dir_tgt"
 
   and do_dir_src e = match e with
   | Po(_,e,_)| Fenced(_,_,e,_) -> e
   | Dp _|Fr _|Hat|Rmw -> Dir R
   | Ws _|Rf _ -> Dir W
   | Leave c|Back c -> do_dir_src_com c
-  | Id -> not_that "do_dir_src"
+  | Id -> not_that e "do_dir_src"
+  | Insert _ -> NoDir
 
 
 let fold_tedges f r =
@@ -299,6 +304,7 @@ let fold_tedges f r =
   let r = fold_ie (fun ie -> f (Ws ie)) r in
   let r = f Rmw r in
   let r = fold_sd_extr_extr (fun sd e1 e2 r -> f (Po (sd,e1,e2)) r) r in
+  let r = F.fold_all_fences (fun fe -> f (Insert fe)) r in
   let r =
     F.fold_all_fences
       (fun fe ->
@@ -346,6 +352,13 @@ let fold_tedges f r =
                          f e k
                      | _,_ -> k
                  end
+                 | Insert _ ->
+                     begin match a1,a2 with
+                     | None,None ->
+                         let e =  { a1; a2;edge=te; } in
+                         f e k
+                     | _,_ -> k
+                     end
                  | _ ->
                      f {a1; a2; edge=te;} k))))
 
@@ -492,25 +505,26 @@ let do_set_tgt d e = match e  with
   | Fenced(f,sd,src,_) -> Fenced(f,sd,src,Dir d)
   | Dp (dp,sd,_) -> Dp (dp,sd,Dir d)
   | Rf _ | Hat
-  | Id|Ws _|Fr _|Rmw|Leave _|Back _-> e
+  | Insert _|Id|Ws _|Fr _|Rmw|Leave _|Back _-> e
 
 and do_set_src d e = match e with
   | Po(sd,_,tgt) -> Po(sd,Dir d,tgt)
   | Fenced(f,sd,_,tgt) -> Fenced(f,sd,Dir d,tgt)
   | Fr _|Hat|Dp _
-  | Id|Ws _|Rf _|Rmw|Leave _|Back _ -> e
+  | Insert _|Id|Ws _|Rf _|Rmw|Leave _|Back _ -> e
 
-let set_tgt d e = { e with edge = do_set_tgt d e.edge ; }
-and set_src d e = { e with edge = do_set_src d e.edge ; }
+  let set_tgt d e = { e with edge = do_set_tgt d e.edge ; }
+  and set_src d e = { e with edge = do_set_src d e.edge ; }
 
   let loc_sd e = match e.edge with
   | Po (sd,_,_) | Fenced (_,sd,_,_) | Dp (_,sd,_) -> sd
-  | Fr _|Ws _|Rf _|Hat|Rmw|Id|Leave _|Back _ -> Same
+  | Insert _|Fr _|Ws _|Rf _|Hat|Rmw|Id|Leave _|Back _ -> Same
 
   let get_ie e = match e.edge with
   | Id |Po _|Dp _|Fenced _|Rmw -> Int
   | Rf ie|Fr ie|Ws ie -> ie
   | Leave _|Back _|Hat -> Ext
+  | Insert _ -> Int
 
 
   type full_ie = IE of ie | LeaveBack
@@ -523,10 +537,11 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
   let can_precede_dirs  x y = match x.edge,y.edge with
   | (Id,Id) -> false
   | (Id,_)|(_,Id) -> true
+  | (Insert _,Insert _) -> false
   | _,_ ->
       begin match dir_tgt x,dir_src y with
-      | Irr,Irr -> false
-      | (Irr,Dir _) | (Dir _,Irr) -> true
+      | (Irr,Irr) -> false
+      | (Irr,Dir _) | (Dir _,Irr)|(NoDir,_)|(_,NoDir) -> true
       | Dir d1,Dir d2 -> d1=d2
       end
 
@@ -548,7 +563,7 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
 (*************************************************************)
 
   let expand_dir d f = match d with
-  | Dir _ -> f d
+  | Dir _|NoDir -> f d
   | Irr -> fun k -> f (Dir W) (f (Dir R) k)
 
   let expand_dir2 e1 e2 f =
@@ -557,7 +572,7 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
 
   let do_expand_edge e f =
     match e.edge with
-    | Id|Rf _ | Fr _ | Ws _ | Hat |Rmw|Dp _|Leave _|Back _
+    | Insert _|Id|Rf _ | Fr _ | Ws _ | Hat |Rmw|Dp _|Leave _|Back _
       -> f e
     | Po(sd,e1,e2) ->
         expand_dir2 e1 e2 (fun d1 d2 -> f {e with edge=Po(sd,d1,d2);})
@@ -600,7 +615,7 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
   let merge_dir d1 d2 = match d1,d2 with
   | (Irr,Dir d)|(Dir d,Irr) -> d
   | Dir d1,Dir d2 -> assert (d1=d2) ; d1
-  | Irr,Irr -> assert false
+  | (Irr,Irr)|(NoDir,_)|(_,NoDir) -> assert false
 
   let merge_atom a1 a2 = match a1,a2 with
   | None,Some _ -> a2
@@ -611,10 +626,10 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
   let merge_pair e1 e2 = match e1,e2 with
   | {edge=Id;},{edge=Id;} -> e1
   | _,_ ->
-    let tgt = merge_dir (dir_tgt e1) (dir_tgt e2)
-    and src = merge_dir (dir_src e1) (dir_src e2) in
-    let e = set_tgt tgt (set_src src e1) in
-    { e with a1 = merge_atom e1.a1 e2.a1; a2 = merge_atom e1.a2 e2.a2; }
+      let tgt = merge_dir (dir_tgt e1) (dir_tgt e2)
+      and src = merge_dir (dir_src e1) (dir_src e2) in
+      let e = set_tgt tgt (set_src src e1) in
+      { e with a1 = merge_atom e1.a1 e2.a1; a2 = merge_atom e1.a2 e2.a2; }
 
   let remove_id =
     List.filter (fun e -> not (is_id e.edge))
@@ -649,6 +664,7 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
   | _ -> f e r
 
 
+
   let varatom es f r =
     let rec var_rec ves es r = match es with
     | [] -> f (resolve_edges (List.rev ves)) r
@@ -657,15 +673,14 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
           (fun e r -> match e.a1 with
           | Some _ -> var_rec (e::ves) es r
           | None ->
-              let d = match dir_src e with
-              | Dir d -> d
-              | Irr -> assert false (* resolved at this step *) in
-              F.varatom_dir d
-                (fun a r ->
-                    var_rec
-                      ({e with a1=a}::ves)
-                      es r)
-                  r)
+              begin match dir_src e with
+              | Dir d ->
+                  F.varatom_dir d
+                    (fun a r -> var_rec ({e with a1=a}::ves)  es r)
+                    r
+              | NoDir ->  var_rec (e::ves) es r
+              | Irr ->  assert false (* resolved at this step *)
+              end)
           r in
     var_rec [] es r
 
@@ -748,20 +763,20 @@ and set_src d e = { e with edge = do_set_src d e.edge ; }
   let show =
     let open ShowGen in
     function
-    | Edges ->
-        let es = fold_pp_edges (fun s k -> s::k) [] in
-        let es = List.sort String.compare es in
-        List.iter (eprintf " %s") es ;
-        eprintf "\n%!"
-    | Annotations ->
-        let es =
-          F.fold_non_mixed
-            (fun a k -> { edge=Id; a1=Some a; a2=Some a;}::k) [] in
-        List.iter
-          (fun e -> eprintf " %s" (pp_edge e))
-          es ;
-        eprintf "\n%!"
-    | Fences ->
-        F.fold_all_fences (fun f () -> eprintf " %s" (F.pp_fence f)) () ;
-        eprintf "\n%!"
+      | Edges ->
+          let es = fold_pp_edges (fun s k -> s::k) [] in
+          let es = List.sort String.compare es in
+          List.iter (eprintf " %s") es ;
+          eprintf "\n%!"
+      | Annotations ->
+          let es =
+            F.fold_non_mixed
+              (fun a k -> { edge=Id; a1=Some a; a2=Some a;}::k) [] in
+          List.iter
+            (fun e -> eprintf " %s" (pp_edge e))
+            es ;
+          eprintf "\n%!"
+      | Fences ->
+          F.fold_all_fences (fun f () -> eprintf " %s" (F.pp_fence f)) () ;
+          eprintf "\n%!"
 end
