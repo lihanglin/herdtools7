@@ -48,6 +48,7 @@ module type S = sig
     | Rmw
 
   val is_id : tedge -> bool
+  val is_insert : tedge -> bool
 
   type edge = { edge: tedge;  a1:atom option; a2: atom option; }
   val plain_edge : tedge -> edge
@@ -160,6 +161,11 @@ and type atom = F.atom = struct
   let is_id = function
     | Id -> true
     | Insert _|Hat|Rmw|Rf _|Fr _|Ws _|Po (_, _, _)
+    | Fenced (_, _, _, _)|Dp (_, _, _)|Leave _|Back _ -> false
+
+  let is_insert = function
+    | Insert _ -> true
+    | Id|Hat|Rmw|Rf _|Fr _|Ws _|Po (_, _, _)
     | Fenced (_, _, _, _)|Dp (_, _, _)|Leave _|Back _ -> false
 
 

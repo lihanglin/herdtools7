@@ -42,7 +42,7 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
     val comp_atoms : C.C.node -> StringSet.t
     val check_here : C.C.node -> bool
     val do_poll : C.C.node -> bool
-  end = 
+  end =
   functor (O:Config) -> functor (C:ArchRun.S) ->
   struct
 
@@ -71,7 +71,7 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
             vs)
         cos0 ;
       eprintf "\n%!"
-        
+
 (****************************)
 (* Last in coherence orders *)
 (****************************)
@@ -117,10 +117,14 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
       {ploc=n.C.C.evt.C.C.loc;
        pdir=Misc.as_some n.C.C.evt.C.C.dir;}
 
+    let is_non_insert e =  not (C.E.is_insert e.C.E.edge)
+
     let io_of_thread n = match n with
     | []|[_] -> None
     | n0::rem ->
-        Some (io_of_node n0,io_of_node (Misc.last rem))
+        let n0 = C.C.find_edge is_non_insert n0
+        and n1 = C.C.find_edge_prev is_non_insert (Misc.last rem) in
+        Some (io_of_node n0,io_of_node n1)
 
     let io_of_detour _n = None
 
@@ -153,11 +157,11 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
           | Same ->
               begin match  n.C.C.evt.C.C.dir with
               | Some W -> true
-              | None|Some R -> do_rec n.C.C.prev 
+              | None|Some R -> do_rec n.C.C.prev
               end
           | Diff -> false in
       do_rec m.C.C.prev
- 
+
     let write_after m =
       let rec do_rec n =
         let e = n.C.C.edge in
@@ -169,7 +173,7 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
             if nxt == m then false else
             begin match C.E.loc_sd e with
             | Same -> do_rec nxt
-            | Diff -> false                  
+            | Diff -> false
             end
         end in
       do_rec m.C.C.next
@@ -206,14 +210,14 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
 (* Misc *)
 (********)
 
-(* Local writes *)            
+(* Local writes *)
 
     let comp_loc_writes n0 =
       let rec do_rec n =
         let k =
           if n.C.C.next == n0 then StringSet.empty
           else do_rec n.C.C.next in
-        let k = 
+        let k =
           match n.C.C.evt.C.C.dir with
           | Some W -> StringSet.add n.C.C.evt.C.C.loc k
           | Some R|None -> k in
@@ -252,5 +256,5 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
       match O.poll,n.C.C.prev.C.C.edge.C.E.edge,n.C.C.evt.C.C.v with
       | true,
         (C.E.Rf Ext|C.E.Leave CRf|C.E.Back CRf),1 -> true
-      | _,_,_ -> false   
+      | _,_,_ -> false
   end

@@ -48,6 +48,14 @@ module type S = sig
       mutable prev : node ;
     }
   val nil : node
+  val str_node : node -> string
+
+(* Find, may raise Not_found *)
+  val find_node : (node -> bool) -> node -> node
+  val find_node_prev : (node -> bool) -> node -> node
+
+  val find_edge : (edge -> bool) -> node -> node
+  val find_edge_prev : (edge -> bool) -> node -> node
 
 (* Re-extract edges out of cycle *)
   val extract_edges : node -> edge list
@@ -135,20 +143,22 @@ module Make (O:Config) (E:Edge.S) :
     else
       sprintf "%s%s %s %i" (debug_dir e.dir) (debug_atom e.atom) e.loc e.v
 
-let debug_edge = E.pp_edge
+  let debug_edge = E.pp_edge
 
 
-let rec nil =
-  {
-   evt = evt_null ;
-   edge = E.plain_edge (E.Po (Diff,Irr,Irr)) ;
-   next = nil ;
-   prev = nil ;
-  }
+  let rec nil =
+    {
+     evt = evt_null ;
+     edge = E.plain_edge (E.Po (Diff,Irr,Irr)) ;
+     next = nil ;
+     prev = nil ;
+   }
 
-let debug_node chan n =
-  fprintf chan "%s -%s->"
-    (debug_evt n.evt) (debug_edge n.edge)
+  let debug_node chan n =
+    fprintf chan "%s -%s->"
+      (debug_evt n.evt) (debug_edge n.edge)
+
+  let str_node n = sprintf "%s -%s->" (debug_evt n.evt) (debug_edge n.edge)
 
   let debug_nodes chan ns =
     let rec iter chan = function
@@ -157,13 +167,13 @@ let debug_node chan n =
       | n::ns -> fprintf chan "%a,%a" debug_node n iter ns in
     iter chan ns
 
- let debug_cycle chan n =
-  let rec do_rec m =
-    debug_node chan m ;
-    output_char chan '\n' ;
-    if m.next != n then do_rec m.next in
-  do_rec n ;
-  flush chan
+  let debug_cycle chan n =
+    let rec do_rec m =
+      debug_node chan m ;
+      output_char chan '\n' ;
+      if m.next != n then do_rec m.next in
+    do_rec n ;
+    flush chan
 
 
 
@@ -219,22 +229,21 @@ let find_node p n =
     if p m then m
     else
       let m = m.next in
-      if m == n then raise Exit
+      if m == n then raise Not_found
       else do_rec m in
   do_rec n
 
-
-let find_edge p = find_node (fun n -> p n.edge)
 
 let find_node_prev p n =
   let rec do_rec m =
     if p m then m
     else
       let m = m.prev in
-      if m == n then raise Exit
+      if m == n then raise Not_found
       else do_rec m in
   do_rec n
 
+let find_edge p = find_node (fun n -> p n.edge)
 let find_edge_prev p = find_node_prev (fun n -> p n.edge)
 
 (* Add events in nodes *)
@@ -290,15 +299,12 @@ let next_co =
 (****************************)
 
 (* Put directions into edge component of nodes, for easier access *)
-let is_insert evt = match evt.E.edge with
-| E.Insert _ -> true
-| _ -> false
 
-let rec prev_non_insert m =
-  let p = m.prev in if is_insert p.edge then prev_non_insert p else p
+let is_insert e = E.is_insert e.E.edge
 
-let rec next_non_insert m =
-  let n = m.next in if is_insert n.edge then next_non_insert n else n
+let prev_non_insert m =
+  try find_edge_prev (fun e -> not (is_insert e)) m.prev
+  with Not_found -> assert false
 
 let rec next_dir m = match m.next.evt.dir with
 | None -> next_dir m.next
@@ -329,6 +335,7 @@ let set_dir n0 =
     if not (is_insert m.edge) then begin
       let my_d =  E.dir_src m.edge in
       let p = prev_non_insert m in
+(*      eprintf "p=%a, m=%a\n" debug_node p debug_node m  ; *)
       let prev_d = E.dir_tgt p.edge in
       let d = match prev_d,my_d with
       | Irr,Irr ->
@@ -451,7 +458,7 @@ let set_same_loc st n0 =
               m.prev.evt.loc <> m.evt.loc &&
               m.next.evt.loc = m.evt.loc) n in
         split_by_loc m
-      with Exit -> try
+      with Not_found -> try
         let m =
           find_node
             (fun m -> match m.prev.edge.E.edge with
@@ -483,8 +490,10 @@ let do_set_read_v =
         | Some R ->
             set_read_v n cell ;
             do_rec cell ns
-        | None|Some W ->
+        | Some W ->
             do_rec n.evt.cell ns
+        | None ->
+            do_rec cell ns
         end in
   do_rec 0
 
@@ -505,12 +514,12 @@ let finish n =
   let sd,n =
     let no =
       try Some (find_edge_prev diff_loc (find_edge_prev diff_proc n))
-      with Exit -> None in
+      with Not_found -> None in
     match no with
     | Some n ->
         Diff,
         begin try find_edge same_loc n
-        with Exit -> Warn.fatal "This cycle changes location at every step" end
+        with Not_found -> Warn.fatal "This cycle changes location at every step" end
     | None -> Same,n in
 
   let _nv,_st =
@@ -573,7 +582,7 @@ let find_start_proc n =
   else
     let n = find_edge (fun n -> diff_proc n) n in
     try find_edge same_proc n
-    with Exit -> n
+    with Not_found -> n
 
 
 let cons_not_nil k1 k2 = match k1 with
@@ -637,10 +646,15 @@ let merge_changes n nss =
       let e1 = fst.evt and e2 = lst.evt in
       e1.loc = e2.loc && value_before e2 e1
 
+  let debug_proc ns =
+    String.concat " " (List.map (fun n -> sprintf "<%s>" (str_node n)) ns)
+
+  let debug_procs nss =  List.iter (fun ns -> eprintf "%s\n" (debug_proc ns)) nss
+
   let split_procs n =
     let n =
       try find_start_proc n
-      with Exit -> Warn.fatal "Cannot split in procs" in
+      with Not_found -> Warn.fatal "Cannot split in procs" in
     let rec do_rec m =
       let k1,k2 =
         if m.next == n then begin
@@ -668,6 +682,9 @@ let merge_changes n nss =
       not O.allow_back &&
       List.exists proc_back nss
     then Warn.fatal "Forbidden po vs. com" ;
+    if O.verbose > 1 then begin
+      eprintf "SPLITTED:\n" ; debug_procs nss
+    end ;
     nss
 
 (****************************)
