@@ -603,7 +603,18 @@ and do_set_src d e = match e with
   let expand_edges es f = do_expand_edges (List.rev es) f []
 
 (* resolve *)
+  let rec find_non_insert = function
+    | [] -> raise Not_found
+    | e::es -> begin match e.edge with
+      | Insert _ ->
+          let bef,ni,aft = find_non_insert es in
+          e::bef,ni,aft
+      | _ ->
+          [],e,es
+    end
+
   let resolve_pair e1 e2 =
+(*    eprintf "Resolve pair <%s,%s> -> " (debug_edge e1)  (debug_edge e2) ; *)
     let e1,e2 =
       try
         let d1 = dir_tgt e1 and d2 = dir_src e2 in
@@ -613,10 +624,13 @@ and do_set_src d e = match e with
         | _,_ -> e1,e2
       with NotThat _ -> e1,e2 in
     let a1 = e1.a2 and a2 = e2.a1 in
-    match a1,a2 with
-    | None,Some _ -> { e1 with a2 = a2;},e2
-    | Some _,None -> e1, { e2 with a1 = a1}
-    | _,_ -> e1,e2
+    let e1,e2 as r =
+      match a1,a2 with
+      | None,Some _ -> { e1 with a2 = a2;},e2
+      | Some _,None -> e1, { e2 with a1 = a1}
+      | _,_ -> e1,e2 in
+(*    eprintf "<%s,%s>\n" (debug_edge e1) (debug_edge e2) ; *)
+    r
 
   let merge_dir d1 d2 = match d1,d2 with
   | (Irr,Dir d)|(Dir d,Irr) -> d
@@ -629,33 +643,51 @@ and do_set_src d e = match e with
   | None,None -> None
   | Some a1,Some a2 -> assert (F.compare_atom a1 a2 = 0) ; Some a1
 
-  let merge_pair e1 e2 = match e1,e2 with
-  | {edge=Id;},{edge=Id;} -> e1
+  let merge_pair e1 e2 = match e1.edge,e2.edge with
+  | (Id,Id) -> e1
+  | (Insert _,_)|(_,Insert _) -> assert false
   | _,_ ->
       let tgt = merge_dir (dir_tgt e1) (dir_tgt e2)
       and src = merge_dir (dir_src e1) (dir_src e2) in
       let e = set_tgt tgt (set_src src e1) in
       { e with a1 = merge_atom e1.a1 e2.a1; a2 = merge_atom e1.a2 e2.a2; }
 
-  let remove_id =
-    List.filter (fun e -> not (is_id e.edge))
+  let remove_id = List.filter (fun e -> not (is_id e.edge))
 
-  let resolve_edges es = match es with
-  | []|[_] -> es
-  | fst::es ->
-      let rec do_rec p = function
-        | [] ->
-            let p,fst = resolve_pair p fst in
-            fst,p,[]
-        | e::es ->
-            let p,e = resolve_pair p e in
-            let fst,q,es = do_rec e es in
-            fst,p,q::es in
-      let fst1,fst2,es = do_rec fst es in
-      let fst = merge_pair fst1 fst2 in
-      remove_id (fst::es)
+  let resolve_edges es0 = match es0 with
+  | []|[_] -> es0
+  | e::es ->
+      let rec do_rec e es = match e.edge with
+      | Insert _ ->
+          let fst,nxt,es = do_recs es in
+          fst,e,nxt::es
+      | _ ->
+          begin try
+            let es0,e1,es1 = find_non_insert es in
+            let e,e1 = resolve_pair e e1 in
+            let fst,f,es = do_recs (es0@(e1::es1)) in
+            fst,e,f::es
+          with Not_found -> try
+            let _,e1,_ = find_non_insert es0 in
+            let e,e1 = resolve_pair e e1 in
+            e1,e,es
+          with Not_found -> Warn.user_error "No non insert node in cycle"
+          end
+      and do_recs = function
+(* This case is handled by Not_found handler above *)
+        | [] -> assert false
+        | e::es -> do_rec e es in
+      let fst,e,es = do_rec e es in
+      let e =
+        match e.edge with
+        | Insert _ -> e
+        | _ -> merge_pair fst e in
+      remove_id (e::es)
 
+(********************)
 (* Atomic variation *)
+(********************)
+
 (* Apply atomic variation to nodes with no atomicity (ie a = None)
    This is done after a resolution step (see resolve_edge above),
    with leaves a1 and a2 to None when there us not neighbouring atomic

@@ -57,6 +57,9 @@ module type S = sig
   val find_edge : (edge -> bool) -> node -> node
   val find_edge_prev : (edge -> bool) -> node -> node
 
+  val find_non_insert : node -> node
+  val find_non_insert_prev : node -> node
+
 (* Re-extract edges out of cycle *)
   val extract_edges : node -> edge list
 
@@ -246,6 +249,10 @@ let find_node_prev p n =
 let find_edge p = find_node (fun n -> p n.edge)
 let find_edge_prev p = find_node_prev (fun n -> p n.edge)
 
+let non_insert e = not (E.is_insert e.E.edge)
+let find_non_insert m = find_edge non_insert m
+let find_non_insert_prev m = find_edge_prev non_insert m
+
 (* Add events in nodes *)
 
 module Env = Map.Make(String)
@@ -300,12 +307,6 @@ let next_co =
 
 (* Put directions into edge component of nodes, for easier access *)
 
-let is_insert e = E.is_insert e.E.edge
-
-let prev_non_insert m =
-  try find_edge_prev (fun e -> not (is_insert e)) m.prev
-  with Not_found -> assert false
-
 let rec next_dir m = match m.next.evt.dir with
 | None -> next_dir m.next
 | Some d -> d
@@ -332,9 +333,9 @@ let is_rmw d e = match d with
 
 let set_dir n0 =
   let rec do_rec m =
-    if not (is_insert m.edge) then begin
+    if non_insert m.edge then begin
       let my_d =  E.dir_src m.edge in
-      let p = prev_non_insert m in
+      let p = find_non_insert_prev m.prev in
 (*      eprintf "p=%a, m=%a\n" debug_node p debug_node m  ; *)
       let prev_d = E.dir_tgt p.edge in
       let d = match prev_d,my_d with
@@ -355,7 +356,7 @@ let set_dir n0 =
           if a1 = None && E.is_ext p.edge then a2
           else if a2 = None &&  E.is_ext m.edge then a1
           else
-            Warn.fatal "impossible atomicity %s %s"
+            Warn.fatal "Impossible atomicity %s %s"
               (E.pp_edge p.edge) (E.pp_edge m.edge) in
       let rmw = is_rmw d m in
       m.evt <- { m.evt with dir=Some d; atom=a; rmw=rmw}

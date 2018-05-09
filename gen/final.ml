@@ -49,14 +49,17 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
 
     let show_in_cond =
       if O.optcond then
-        let valid_edge e =
+        let valid_edge m =
+          let e = m.C.C.edge in
           let open C.E in
           match e.C.E.edge with
           | Rf _ | Fr _ | Ws _ | Hat
           | Back _|Leave _ -> true
           | Po _ | Fenced _ | Dp _|Rmw|Insert _ -> false
           | Id -> assert false in
-        (fun n -> valid_edge n.C.C.prev.C.C.edge || valid_edge n.C.C.edge)
+        (fun n ->
+          let p = C.C.find_non_insert_prev n.C.C.prev in
+          valid_edge p || valid_edge n)
       else
         (fun _ -> true)
 

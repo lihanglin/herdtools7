@@ -117,13 +117,11 @@ module Make : functor (O:Config) -> functor (C:ArchRun.S) ->
       {ploc=n.C.C.evt.C.C.loc;
        pdir=Misc.as_some n.C.C.evt.C.C.dir;}
 
-    let is_non_insert e =  not (C.E.is_insert e.C.E.edge)
-
     let io_of_thread n = match n with
     | []|[_] -> None
     | n0::rem ->
-        let n0 = C.C.find_edge is_non_insert n0
-        and n1 = C.C.find_edge_prev is_non_insert (Misc.last rem) in
+        let n0 = C.C.find_non_insert n0
+        and n1 = C.C.find_non_insert_prev (Misc.last rem) in
         Some (io_of_node n0,io_of_node n1)
 
     let io_of_detour _n = None
