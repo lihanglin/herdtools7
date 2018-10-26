@@ -108,6 +108,10 @@ module Make
         DC.fundef_prop "filter_cond" find_type f
 
 
+    let is_srcu_struct t = match t with
+    | CType.Base "struct srcu_struct" -> true
+    | _ -> false
+
 (***********)
 (* Headers *)
 (***********)
@@ -331,10 +335,27 @@ module Make
       end ;
       O.o "static ctx_t **ctx;" ;
       O.o "" ;
+      if List.exists (fun (_,t) -> is_srcu_struct(t)) test.T.globals
+      then begin
+        O.o "static void cleanup_srcu_structs(struct srcu_struct *p,int sz) {" ;
+        O.oi "for (int _i = 0 ; _i < sz ; _i++) cleanup_srcu_struct(&p[_i]);" ;
+        O.o "}" ;
+        O.o ""
+      end ;
       O.o "static void free_ctx(ctx_t *p) { " ;
       O.oi "if (p == NULL) return;" ;
       let free tag = O.fi "if (p->%s) kfree(p->%s);" tag tag in
-      List.iter (fun (s,_) ->  free s) test.T.globals ;
+      List.iter
+        (fun (s,t) ->
+          if is_srcu_struct t then begin
+            O.fi "if (p->%s) {" s ;
+            O.fii "cleanup_srcu_structs(p->%s,size);" s ;
+            O.fii "kfree(p->%s);" s ;
+            O.oi "}"
+          end else begin
+            free s
+          end)
+        test.T.globals ;
       iter_all_outs
         (fun proc (reg,t) ->
           let tag = A.Out.dump_out_reg proc reg in
@@ -353,7 +374,7 @@ module Make
       O.oi "if (!r) { return NULL; }" ;
       let alloc tag =
         O.fi "r->%s = kmalloc(sizeof(r->%s[0])*sz,GFP_KERNEL);" tag tag ;
-        O.fi "if (!r->%s) { free_ctx(r); return NULL; }" tag in
+        O.fi "if (!r->%s) { return NULL; }" tag in
       List.iter
         (fun (s,t) ->
           alloc s ;
@@ -361,7 +382,17 @@ module Make
           | CType.Base "spinlock_t" ->
               O.fi
                 "for (int _i=0 ; _i < sz ; _i++) spin_lock_init(&r->%s[_i]);" s
-          | _ -> ())
+          | _ ->
+              if is_srcu_struct t then begin
+                O.oi "for (int _i=0 ; _i < sz ; _i++) {" ;
+                O.fii "if (init_srcu_struct(&r->%s[_i])) {" s ;
+                O.fiii "cleanup_srcu_structs(r->%s,_i);" s ;
+                O.fiii "kfree(r->%s);" s ;
+                O.fiii "r->%s = NULL;" s ;
+                O.oiii "return NULL;" ;
+                O.oii "}" ;
+                O.oi "}"
+              end)
         test.T.globals ;
       iter_all_outs
         (fun proc (reg,t) ->
@@ -372,7 +403,7 @@ module Make
       | User -> alloc "barrier"
       | TimeBase ->
           O.oi "r->barrier = alloc_sense();";
-          O.oi "if (!r->barrier) { free_ctx(r); return NULL; }"
+          O.oi "if (!r->barrier) { return NULL; }"
       end ;
       O.oi "return r;" ;
       O.o "}" ;
@@ -393,10 +424,11 @@ module Make
                 (dump_a_leftval s)
                 (dump_a_v v)
           | _ ->
-              O.fii "%s = (%s)%s;"
-                (dump_a_leftval s)
-                (CType.dump ty)
-                (dump_a_v v))
+              if not (is_srcu_struct ty) then
+                O.fii "%s = (%s)%s;"
+                  (dump_a_leftval s)
+                  (CType.dump ty)
+                  (dump_a_v v))
         test.T.globals ;
       List.iter
         (fun (proc,(_,(outs,_))) ->
@@ -682,6 +714,7 @@ let dump_init_exit test =
   O.o "litmus_exit(void) {" ;
   O.oi "for (int k=0 ; k < ninst ; k++) free_ctx(ctx[k]);" ;
   O.oi "kfree(ctx);" ;
+  O.oi "kfree(online);" ;
   O.oi "remove_proc_entry(\"litmus\",NULL);" ;
   O.o "}" ;
   O.o "" ;
