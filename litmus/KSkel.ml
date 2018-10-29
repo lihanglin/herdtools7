@@ -32,6 +32,7 @@ module type Config = sig
   val stride : KStride.t
   val barrier : KBarrier.t
   val affinity : KAffinity.t
+  val sharelocks : int option
 end
 
 module Make
@@ -47,9 +48,16 @@ module Make
       val dump : Name.t -> T.t -> unit
     end =
   struct
+
 (*************)
 (* Utilities *)
 (*************)
+    let spinsize = "spinsize"
+
+    let do_spinsize sz = match Cfg.sharelocks with
+    | None -> sz
+    | Some _ -> spinsize
+
     module UCfg = struct
       let memory = Memory.Direct
       let preload = Preload.NoPL
@@ -112,6 +120,9 @@ module Make
     | CType.Base "struct srcu_struct" -> true
     | _ -> false
 
+    and is_spinlock_t t = match t with
+    | CType.Base "spinlock_t" -> true
+    | _ -> false
 (***********)
 (* Headers *)
 (***********)
@@ -232,6 +243,10 @@ module Make
       O.f "static const int nthreads = %i;" (T.get_nprocs test) ;
       O.f "static unsigned int nruns = %i;" Cfg.runs ;
       O.f "static unsigned int size = %i;" Cfg.size ;
+      begin match Cfg.sharelocks with
+      | None -> ()
+      | Some sz -> O.f "const static unsigned int %s = %i;" spinsize sz;
+      end ;
       O.f "static unsigned int stride = %i;"
         (let open KStride in
         match Cfg.stride with
@@ -349,7 +364,8 @@ module Make
         (fun (s,t) ->
           if is_srcu_struct t then begin
             O.fi "if (p->%s) {" s ;
-            O.fii "cleanup_srcu_structs(p->%s,size);" s ;
+            let sz = do_spinsize "size" in
+            O.fii "cleanup_srcu_structs(p->%s,%s);" s sz ;
             O.fii "kfree(p->%s);" s ;
             O.oi "}"
           end else begin
@@ -372,19 +388,23 @@ module Make
       O.o "static ctx_t *alloc_ctx(size_t sz) { " ;
       O.oi "ctx_t *r = kzalloc(sizeof(*r),GFP_KERNEL);" ;
       O.oi "if (!r) { return NULL; }" ;
-      let alloc tag =
-        O.fi "r->%s = kmalloc(sizeof(r->%s[0])*sz,GFP_KERNEL);" tag tag ;
+      let alloc sz tag =
+        O.fi "r->%s = kmalloc(sizeof(r->%s[0])*%s,GFP_KERNEL);" tag tag sz;
         O.fi "if (!r->%s) { return NULL; }" tag in
       List.iter
         (fun (s,t) ->
-          alloc s ;
           match t with
           | CType.Base "spinlock_t" ->
+              let sz = do_spinsize "sz" in
+              alloc sz s ;
               O.fi
-                "for (int _i=0 ; _i < sz ; _i++) spin_lock_init(&r->%s[_i]);" s
+                "for (int _i=0 ; _i < %s ; _i++) spin_lock_init(&r->%s[_i]);"
+                sz s
           | _ ->
               if is_srcu_struct t then begin
-                O.oi "for (int _i=0 ; _i < sz ; _i++) {" ;
+                let sz = do_spinsize "sz" in
+                alloc sz s ;
+                O.fi "for (int _i=0 ; _i < %s ; _i++) {" sz ;
                 O.fii "if (init_srcu_struct(&r->%s[_i])) {" s ;
                 O.fiii "cleanup_srcu_structs(r->%s,_i);" s ;
                 O.fiii "kfree(r->%s);" s ;
@@ -392,15 +412,19 @@ module Make
                 O.oiii "return NULL;" ;
                 O.oii "}" ;
                 O.oi "}"
-              end)
+              end else if is_spinlock_t t then begin
+                let sz = do_spinsize "sz" in
+                alloc sz s
+              end else
+                alloc "sz" s)
         test.T.globals ;
       iter_all_outs
         (fun proc (reg,t) ->
           let tag = A.Out.dump_out_reg proc reg in
-          alloc tag) test ;
+          alloc "sz" tag) test ;
       begin let open KBarrier in
       match Cfg.barrier with
-      | User -> alloc "barrier"
+      | User -> alloc "sz" "barrier"
       | TimeBase ->
           O.oi "r->barrier = alloc_sense();";
           O.oi "if (!r->barrier) { return NULL; }"
@@ -500,7 +524,11 @@ let dump_threads tname env test =
       | TimeBase ->
           O.oiii "barrier_wait(_a->barrier);"
       end ;
-      Lang.dump_call O.out (Indent.as_string indent3)
+      let tr_idx t idx = match Cfg.sharelocks with
+      | Some _ when is_srcu_struct t || is_spinlock_t t ->
+          sprintf "%s %% %s" idx spinsize
+      | Some _|None -> idx in
+      Lang.dump_call tr_idx O.out (Indent.as_string indent3)
         myenv global_env envVolatile proc out ;
       O.oii "}" ;
       O.oi "}" ;
